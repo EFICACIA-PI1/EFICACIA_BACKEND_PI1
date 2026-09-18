@@ -24,7 +24,7 @@ SECRET_KEY = os.environ["SECRET_KEY"]
 DEBUG = os.environ.get("DEBUG", "False") == "True"
 
 ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
-RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+RENDER_HOST = os.environ.get("https://eficacia-backend-pi1.onrender.com")
 if RENDER_HOST:
     ALLOWED_HOSTS.append(RENDER_HOST)
 
