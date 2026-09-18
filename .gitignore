@@ -27,3 +27,5 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+venv/
