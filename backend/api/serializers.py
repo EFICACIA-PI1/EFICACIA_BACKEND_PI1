@@ -63,6 +63,10 @@ class TaskSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"parent": "Una tarea de nivel superior no puede tener una tarea padre."}
             )
+        if parent is not None and parent.type != Task.TaskType.TASK:
+            raise serializers.ValidationError(
+                {"parent": "La tarea padre debe ser una tarea de nivel superior, no otra subtarea."}
+            )
 
         event = self.context.get("event") or getattr(self.instance, "event", None)
         if parent is not None and event is not None and parent.event_id != event.id:

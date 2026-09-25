@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
@@ -90,6 +91,26 @@ class Task(models.Model):
     class Meta:
         db_table = "api_task"
         ordering = ["due_date"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(type="task", parent__isnull=True)
+                    | models.Q(type="subtask", parent__isnull=False)
+                ),
+                name="task_type_parent_consistency",
+            ),
+        ]
 
     def __str__(self):
         return self.name
+
+    def clean(self):
+        super().clean()
+        if self.parent_id and self.parent.type != self.TaskType.TASK:
+            raise ValidationError(
+                {"parent": "La tarea padre debe ser una tarea de nivel superior, no otra subtarea."}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
