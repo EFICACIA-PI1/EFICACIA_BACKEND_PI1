@@ -18,6 +18,12 @@ class Organizer(models.Model):
 
     class Meta:
         db_table = "api_organizer"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(daily_hours_limit__gte=1) & models.Q(daily_hours_limit__lte=16),
+                name="organizer_daily_hours_limit_range",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} {self.last_name}"
@@ -98,6 +104,10 @@ class Task(models.Model):
                     | models.Q(type="subtask", parent__isnull=False)
                 ),
                 name="task_type_parent_consistency",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(estimated_hours__gte=Decimal("0.1")),
+                name="task_estimated_hours_positive",
             ),
         ]
 
