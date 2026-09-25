@@ -5,8 +5,8 @@ from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 
 from .demo import get_demo_organizer
-from .models import Event
-from .serializers import EventDetailSerializer, EventSerializer
+from .models import Event, Task
+from .serializers import EventDetailSerializer, EventSerializer, TaskSerializer
 
 
 @api_view(["GET"])
@@ -53,3 +53,43 @@ class EventDetailView(FriendlyNotFoundMixin, generics.RetrieveUpdateDestroyAPIVi
 
     def get_queryset(self):
         return Event.objects.filter(organizer=get_demo_organizer())
+
+
+class TaskListCreateView(generics.ListCreateAPIView):
+    """GET /api/events/<event_id>/tasks/ lista las tareas de ese evento.
+    POST /api/events/<event_id>/tasks/ crea una tarea/subtarea (US-02).
+    """
+
+    serializer_class = TaskSerializer
+
+    def get_event(self):
+        if not hasattr(self, "_event"):
+            try:
+                self._event = Event.objects.get(
+                    pk=self.kwargs["event_id"], organizer=get_demo_organizer()
+                )
+            except Event.DoesNotExist:
+                raise NotFound("Evento no encontrado.")
+        return self._event
+
+    def get_queryset(self):
+        return Task.objects.filter(event=self.get_event())
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["event"] = self.get_event()
+        return context
+
+    def perform_create(self, serializer):
+        event = self.get_event()
+        serializer.save(event=event, organizer=event.organizer)
+
+
+class TaskDetailView(FriendlyNotFoundMixin, generics.RetrieveUpdateDestroyAPIView):
+    """GET/PUT/PATCH/DELETE /api/tasks/<id>/ (US-03 editar/eliminar subtarea)."""
+
+    serializer_class = TaskSerializer
+    not_found_message = "Tarea no encontrada."
+
+    def get_queryset(self):
+        return Task.objects.filter(organizer=get_demo_organizer())
