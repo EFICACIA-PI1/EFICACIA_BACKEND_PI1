@@ -37,6 +37,14 @@ python manage.py runserver
 
 La API queda en `http://127.0.0.1:8000/api/`. El admin de Django en `http://127.0.0.1:8000/admin/` (crea un superusuario con `python manage.py createsuperuser` si lo necesitas).
 
+## Documentación interactiva
+
+- Swagger UI: `http://127.0.0.1:8000/api/docs/`
+- ReDoc: `http://127.0.0.1:8000/api/redoc/`
+- Esquema OpenAPI en crudo: `http://127.0.0.1:8000/api/schema/`
+
+Se genera automáticamente (drf-spectacular) a partir de los serializers y vistas: siempre refleja el contrato real, sin mantenerla a mano.
+
 ## Pruebas
 
 ```bash

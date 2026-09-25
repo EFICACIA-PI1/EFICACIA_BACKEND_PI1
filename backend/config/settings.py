@@ -46,8 +46,23 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'corsheaders',
     'rest_framework',
+    'drf_spectacular',
     'api',
 ]
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'EFICACIA API — Organizador de Eventos Independientes',
+    'DESCRIPTION': (
+        'API REST del Mini-proyecto 1. Sprint 1: eventos y su plan inicial '
+        'de subtareas logísticas, con un organizador demo (sin login todavía).'
+    ),
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
