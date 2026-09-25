@@ -31,7 +31,7 @@ CREATE TABLE api_event (
     updated_at TIMESTAMPTZ NOT NULL,
     organizer_id BIGINT NOT NULL
         CONSTRAINT api_event_organizer_id_e13d0573_fk_api_organizer_id
-        REFERENCES api_organizer (id) DEFERRABLE INITIALLY DEFERRED
+        REFERENCES api_organizer (id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE INDEX api_event_organizer_id_e13d0573 ON api_event (organizer_id);
