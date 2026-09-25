@@ -41,7 +41,7 @@ CREATE TABLE api_task (
     name VARCHAR(150) NOT NULL,
     description VARCHAR(500) NOT NULL,
     due_date DATE NOT NULL,
-    estimated_hours NUMERIC(5, 2) NOT NULL,
+    estimated_hours NUMERIC(5, 2) NOT NULL CHECK (estimated_hours >= 0.1),
     state VARCHAR(20) NOT NULL,
     type VARCHAR(20) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
