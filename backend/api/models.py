@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
@@ -78,7 +80,7 @@ class Task(models.Model):
     estimated_hours = models.DecimalField(
         max_digits=5,
         decimal_places=2,
-        validators=[MinValueValidator(0.1)],
+        validators=[MinValueValidator(Decimal("0.1"))],
     )
     state = models.CharField(max_length=20, choices=State.choices, default=State.PENDIENTE)
     type = models.CharField(max_length=20, choices=TaskType.choices, default=TaskType.TASK)
