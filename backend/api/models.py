@@ -1,13 +1,21 @@
 from decimal import Decimal
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
 
 class Organizer(models.Model):
-    """Organizador de eventos. Sprint 1 usa un organizador demo (sin login)."""
+    """Organizador de eventos, asociado opcionalmente a un usuario de Django."""
 
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="organizer",
+    )
     name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     daily_hours_limit = models.PositiveSmallIntegerField(
