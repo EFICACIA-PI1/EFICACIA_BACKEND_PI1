@@ -3,6 +3,17 @@ from rest_framework import serializers
 from .models import Event, Task
 
 
+class LoginSerializer(serializers.Serializer):
+    """Credenciales de acceso local (usuario de Django)."""
+
+    username = serializers.CharField()
+    password = serializers.CharField(write_only=True, style={"input_type": "password"})
+
+
+class LoginResponseSerializer(serializers.Serializer):
+    token = serializers.CharField()
+
+
 class EventSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
@@ -82,3 +93,11 @@ class EventDetailSerializer(EventSerializer):
 
     class Meta(EventSerializer.Meta):
         fields = EventSerializer.Meta.fields + ["tasks"]
+
+
+class HoyResponseSerializer(serializers.Serializer):
+    """Agrupación de gestiones para la vista Hoy."""
+
+    vencidas = TaskSerializer(many=True)
+    para_hoy = TaskSerializer(many=True)
+    proximas = TaskSerializer(many=True)
