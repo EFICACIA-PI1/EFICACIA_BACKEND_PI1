@@ -45,7 +45,18 @@ class Event(models.Model):
         CUMPLEANOS = "cumpleanos", "Cumpleaños"
         OTRO = "otro", "Otro"
 
-    organizer = models.ForeignKey(Organizer, on_delete=models.CASCADE, related_name="events")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="events",
+    )
+    organizer = models.ForeignKey(
+        Organizer,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="events",
+    )
     name = models.CharField(max_length=150)
     event_type = models.CharField(max_length=30, choices=EventType.choices, default=EventType.OTRO)
     client_contact = models.CharField(max_length=150)
@@ -80,7 +91,13 @@ class Task(models.Model):
         POSPUESTA = "pospuesta", "Pospuesta"
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="tasks")
-    organizer = models.ForeignKey(Organizer, on_delete=models.CASCADE, related_name="tasks")
+    organizer = models.ForeignKey(
+        Organizer,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tasks",
+    )
     parent = models.ForeignKey(
         "self",
         on_delete=models.CASCADE,
@@ -132,3 +149,25 @@ class Task(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+
+class Profile(models.Model):
+    """Datos de perfil del usuario (nombre, teléfono, dirección y cédula)."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="profile",
+    )
+    full_name = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=20, blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    document_number = models.CharField(max_length=20, unique=True, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "api_profile"
+
+    def __str__(self):
+        return self.full_name or self.user.username

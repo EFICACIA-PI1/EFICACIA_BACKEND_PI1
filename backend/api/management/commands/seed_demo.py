@@ -1,16 +1,30 @@
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 
 from api.demo import get_demo_organizer
 from api.models import Event, Task
 
+User = get_user_model()
+
 
 class Command(BaseCommand):
-    help = "Crea datos demo minimos: organizador, un evento y su plan inicial de subtareas."
+    help = "Crea datos demo minimos: usuario, un evento y su plan inicial de subtareas."
 
     def handle(self, *args, **options):
         organizer = get_demo_organizer()
+        if organizer.user_id is None:
+            user, created = User.objects.get_or_create(
+                username="demo",
+                defaults={"email": "demo@eficacia.local"},
+            )
+            if created or not user.has_usable_password():
+                user.set_password("demo123")
+                user.save()
+            organizer.user = user
+            organizer.save(update_fields=["user"])
 
         event, event_created = Event.objects.get_or_create(
+            user=organizer.user,
             organizer=organizer,
             name="Boda de Ana y Luis",
             defaults={
@@ -41,7 +55,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Listo: organizador demo (id={organizer.id}), "
+                f"Listo: usuario demo (id={organizer.user_id}), "
                 f"evento '{event.name}' (id={event.id}) con {event.tasks.count()} tareas."
             )
         )
