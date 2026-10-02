@@ -1,6 +1,6 @@
 # EFICACIA — Backend (Organizador de Eventos Independientes)
 
-API REST en Django + Django REST Framework para el Mini-proyecto 1. Persistencia en PostgreSQL (Supabase). Sprint 1: gestión de eventos y su plan inicial de subtareas logísticas, con un organizador demo (sin login todavía).
+API REST en Django + Django REST Framework para EFICACIA. Persistencia en PostgreSQL (Supabase). Los usuarios administran sus propios eventos, tareas y perfil; incluye registro, autenticación por token y recuperación de contraseña.
 
 ## Requisitos
 
@@ -24,6 +24,7 @@ pip install -r requirements.txt
 #    DEBUG=True
 #    DATABASE_URL=postgresql://usuario:password@host:puerto/basededatos
 #    CORS_ALLOWED_ORIGINS=http://localhost:5173
+#    FRONTEND_URL=http://localhost:5173 (opcional; destino de recuperación)
 
 # 4. Migraciones
 python manage.py migrate
@@ -53,18 +54,27 @@ python manage.py test api --keepdb
 
 Se usa `--keepdb`: al probar contra una base remota vía el *connection pooler* de Supabase, Django a veces no logra borrar la base de datos de prueba al final (el pooler mantiene una conexión colgada). Con `--keepdb` reutiliza la misma base de prueba entre corridas y evita ese problema.
 
-## Autenticación (Sprint 1-2)
+## Autenticación y cuentas
 
-Todavía no hay login. Todas las peticiones se asocian automáticamente a un único "organizador demo" (ver `api/demo.py`), que se crea solo la primera vez que se necesita. Esto se reemplaza por autenticación real en el Sprint 2 (US-11) sin cambiar el resto del código.
+Las rutas protegidas reciben `Authorization: Token <token>`. Cada usuario ve únicamente los eventos y tareas que le pertenecen. `POST /api/auth/register/` crea la cuenta y devuelve un token. Los usuarios creados desde el admin reciben un perfil automáticamente; el admin permite completar sus datos.
 
-## Endpoints (Sprint 1)
+El correo de recuperación se imprime en la terminal por defecto. Para SMTP se configuran `EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS` y `EMAIL_USE_SSL`. El remitente se configura con `DEFAULT_FROM_EMAIL`.
+
+## Endpoints
 
 Todas las respuestas son JSON. Errores de validación devuelven `400` con un objeto `{campo: [mensajes]}`; recursos no encontrados devuelven `404` con `{"detail": "..."}`.
 
 | Método | Ruta | Descripción |
 |---|---|---|
 | GET | `/api/health/` | Ping de salud de la API |
-| GET | `/api/events/` | Lista los eventos del organizador demo |
+| POST | `/api/auth/register/` | Crea usuario, perfil y token |
+| POST | `/api/auth/login/` | Inicia sesión con usuario y contraseña |
+| GET/PATCH | `/api/auth/me/` | Consulta y edita el perfil autenticado |
+| POST | `/api/auth/change-password/` | Cambia la contraseña y rota el token |
+| POST | `/api/auth/password-reset/` | Solicita enlace de recuperación por correo |
+| POST | `/api/auth/password-reset/confirm/` | Confirma el cambio con `uid` y `token` |
+| POST | `/api/auth/logout/` | Invalida el token actual |
+| GET | `/api/events/` | Lista los eventos del usuario autenticado |
 | POST | `/api/events/` | Crea un evento (US-01) |
 | GET | `/api/events/<id>/` | Detalle de un evento, incluye sus tareas (`tasks`) |
 | PUT/PATCH | `/api/events/<id>/` | Edita un evento (US-03) |
@@ -81,4 +91,6 @@ Todas las respuestas son JSON. Errores de validación devuelven `400` con un obj
 
 ### Campos de Task
 
-`name`, `due_date` (fecha), `estimated_hours` (> 0), `description` (opcional). `type` es `"task"` (gestión de nivel superior, valor por defecto) o `"subtask"` (paso dentro de una tarea); si es `"subtask"` requiere `parent` con el id de una tarea `"task"` del mismo evento. `state` (`pendiente`/`hecha`/`pospuesta`) y `organizer`/`event` no se envían: los asigna el servidor.
+`name`, `due_date` (fecha), `estimated_hours` (> 0), `description` (opcional). `type` es `"task"` (gestión de nivel superior, valor por defecto) o `"subtask"` (paso dentro de una tarea); si es `"subtask"` requiere `parent` con el id de una tarea `"task"` del mismo evento. `state` (`pendiente`/`hecha`/`pospuesta`) y `event` no se envían al crear: los asigna el servidor. Las tareas heredan la propiedad del evento.
+
+La recuperación y el contrato completo de request/response están documentados en Swagger (`/api/docs/`) y ReDoc (`/api/redoc/`).
