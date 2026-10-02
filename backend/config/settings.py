@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 
 import dj_database_url
@@ -48,7 +49,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
     'drf_spectacular',
-    'api',
+    'api.apps.ApiConfig',
 ]
 
 REST_FRAMEWORK = {
@@ -56,13 +57,19 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
     ],
+    'DEFAULT_THROTTLE_RATES': {
+        'auth': '10/min',
+    },
 }
+
+if "test" in sys.argv:
+    REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {"auth": "10000/min"}
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'EFICACIA API — Organizador de Eventos Independientes',
     'DESCRIPTION': (
-        'API REST del Mini-proyecto 1. Sprint 2: login local con token, '
-        'aislamiento por organizador y vista Hoy de gestiones agrupadas.'
+        'API REST del Mini-proyecto 1. Registro y perfil de usuario, login '
+        'con token, eventos y tareas del usuario autenticado, y vista Hoy.'
     ),
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
@@ -156,11 +163,27 @@ CORS_ALLOWED_ORIGINS = os.environ.get(
 ).split(",")
 
 
-# Email
-# https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
+# Frontend (enlaces de recuperación de contraseña)
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+# Email (Django 6: MAILERS). Por defecto imprime el correo en la terminal.
+# En producción use EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+# y las variables EMAIL_HOST, EMAIL_PORT, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD,
+# EMAIL_USE_TLS / EMAIL_USE_SSL.
+_email_backend = os.environ.get(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.console.EmailBackend",
+)
+_default_mailer = {"BACKEND": _email_backend}
+if _email_backend == "django.core.mail.backends.smtp.EmailBackend":
+    _default_mailer["OPTIONS"] = {
+        "host": os.environ.get("EMAIL_HOST", "localhost"),
+        "port": int(os.environ.get("EMAIL_PORT", "587")),
+        "username": os.environ.get("EMAIL_HOST_USER", ""),
+        "password": os.environ.get("EMAIL_HOST_PASSWORD", ""),
+        "use_tls": os.environ.get("EMAIL_USE_TLS", "True") == "True",
+        "use_ssl": os.environ.get("EMAIL_USE_SSL", "False") == "True",
+    }
+
+MAILERS = {"default": _default_mailer}
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@eficacia.local")
