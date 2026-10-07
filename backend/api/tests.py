@@ -25,7 +25,6 @@ REGISTER_PAYLOAD = {
     "password_confirm": "ClaveSegura123",
     "full_name": "Olivia Ruiz",
     "phone": "3001234567",
-    "document_number": "1020304050",
     "address": "Cali",
 }
 
@@ -230,6 +229,152 @@ class TaskAPITests(AuthenticatedAPITestCase):
         response = self.client.get(detail_url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["detail"], "Tarea no encontrada.")
+
+    def test_mark_task_state_hecha(self):
+        task = Task.objects.create(
+            event=self.event, name="Reservar salón",
+            due_date="2026-11-01", estimated_hours=3,
+        )
+        detail_url = reverse("task-detail", args=[task.id])
+        response = self.client.patch(detail_url, {"state": "hecha"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["state"], "hecha")
+        task.refresh_from_db()
+        self.assertEqual(task.state, Task.State.HECHA)
+
+    def test_mark_overdue_task_done_keeps_hecha_state(self):
+        task = Task.objects.create(
+            event=self.event, name="Gestión vencida",
+            due_date=timezone.localdate() - timedelta(days=3), estimated_hours=2,
+        )
+        detail_url = reverse("task-detail", args=[task.id])
+        response = self.client.patch(detail_url, {"state": "hecha"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["state"], "hecha")
+        task.refresh_from_db()
+        self.assertEqual(task.state, Task.State.HECHA)
+
+        hoy = self.client.get(reverse("hoy"), {"event": self.event.id}).data
+        self.assertNotIn("Gestión vencida", [t["name"] for t in hoy["vencidas"]])
+
+    def test_task_state_rejects_invalid_value(self):
+        task = Task.objects.create(
+            event=self.event, name="Reservar salón",
+            due_date="2026-11-01", estimated_hours=3,
+        )
+        detail_url = reverse("task-detail", args=[task.id])
+        response = self.client.patch(detail_url, {"state": "vencida"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("state", response.data)
+        task.refresh_from_db()
+        self.assertEqual(task.state, Task.State.PENDIENTE)
+
+
+class TaskReprogramTests(AuthenticatedAPITestCase):
+    """Sprint 3: reprogramar con control de sobrecarga diaria (409)."""
+
+    def setUp(self):
+        super().setUp()
+        self.event = make_event(self.user, name="Evento reprograma")
+        self.mover = Task.objects.create(
+            event=self.event, name="Tarea a reprogramar",
+            due_date="2026-10-01", estimated_hours=4,
+        )
+        self.ocupante = Task.objects.create(
+            event=self.event, name="Ocupa el día",
+            due_date="2026-10-10", estimated_hours=3,
+        )
+        self.url = reverse("task-detail", args=[self.mover.id])
+
+    def test_reprogram_overload_returns_409_with_figures_and_does_not_save(self):
+        response = self.client.patch(self.url, {"due_date": "2026-10-10"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "daily_overload")
+        self.assertEqual(response.data["date"], "2026-10-10")
+        self.assertEqual(response.data["planned_hours"], 7.0)
+        self.assertEqual(response.data["limit_hours"], 6.0)
+        self.assertEqual(response.data["excess_hours"], 1.0)
+        self.assertEqual(response.data["max_hours_for_this_task"], 3.0)
+        self.assertIn("Quedarías con 7 h planificadas (límite 6 h) el 2026-10-10.", response.data["detail"])
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-01")
+
+    def test_reprogram_fits_saves(self):
+        response = self.client.patch(self.url, {"due_date": "2026-10-11"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["due_date"], "2026-10-11")
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-11")
+
+    def test_reprogram_resolved_by_lower_estimated_hours(self):
+        response = self.client.patch(
+            self.url,
+            {"due_date": "2026-10-10", "estimated_hours": 2},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-10")
+        self.assertEqual(self.mover.estimated_hours, 2)
+
+    def test_reprogram_resolved_by_other_date(self):
+        response = self.client.patch(self.url, {"due_date": "2026-10-11"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-11")
+        self.assertEqual(self.mover.state, Task.State.PENDIENTE)
+
+    def test_overload_ignores_done_tasks(self):
+        self.ocupante.state = Task.State.HECHA
+        self.ocupante.save(update_fields=["state"])
+        response = self.client.patch(self.url, {"due_date": "2026-10-10"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-10")
+
+    def test_overload_counts_subtasks(self):
+        self.ocupante.due_date = "2026-11-01"
+        self.ocupante.save(update_fields=["due_date"])
+        parent = Task.objects.create(
+            event=self.event, name="Padre",
+            due_date="2026-10-05", estimated_hours=1,
+        )
+        Task.objects.create(
+            event=self.event, name="Sub que ocupa el día",
+            due_date="2026-10-10", estimated_hours=3,
+            type=Task.TaskType.SUBTASK, parent=parent,
+        )
+        response = self.client.patch(self.url, {"due_date": "2026-10-10"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "daily_overload")
+        self.assertEqual(response.data["planned_hours"], 7.0)
+
+    def test_overload_only_counts_same_user_tasks(self):
+        self.ocupante.due_date = "2026-11-01"
+        self.ocupante.save(update_fields=["due_date"])
+        other_user, _token = make_user("otro_repro")
+        other_event = make_event(other_user, name="Ajeno", location="Lugar ajeno")
+        Task.objects.create(
+            event=other_event, name="Del otro usuario",
+            due_date="2026-10-10", estimated_hours=6,
+        )
+        response = self.client.patch(self.url, {"due_date": "2026-10-10"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-10")
+
+    def test_rename_without_schedule_change_does_not_check_overload(self):
+        response = self.client.patch(self.url, {"name": "Renombrada"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "Renombrada")
+
+    def test_reprogram_default_limit_comes_from_profile(self):
+        self.user.profile.daily_hours_limit = 8
+        self.user.profile.save(update_fields=["daily_hours_limit"])
+        response = self.client.patch(self.url, {"due_date": "2026-10-10"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-10")
 
 
 class TaskModelConstraintTests(APITestCase):
@@ -507,7 +652,6 @@ class RegisterTests(APITestCase):
         self.assertIn("token", response.data)
         self.assertEqual(response.data["user"]["username"], "olivia")
         self.assertEqual(response.data["user"]["email"], "olivia@example.com")
-        self.assertEqual(response.data["user"]["document_number"], "1020304050")
         user = User.objects.get(username="olivia")
         self.assertEqual(user.profile.full_name, "Olivia Ruiz")
         self.assertEqual(user.profile.phone, "3001234567")
@@ -517,9 +661,17 @@ class RegisterTests(APITestCase):
         response = self.client.post(self.url, REGISTER_PAYLOAD, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-    def test_register_duplicate_username_email_document(self):
+    def test_register_ignores_legacy_document_number_field(self):
+        payload = {**REGISTER_PAYLOAD, "username": "contauri", "email": "otro@example.com",
+                   "document_number": "1020304050"}
+        response = self.client.post(self.url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn("document_number", response.data["user"])
+        self.assertIsNone(getattr(User.objects.get(username="contauri").profile, "document_number", None))
+
+    def test_register_duplicate_username_email(self):
         self.client.post(self.url, REGISTER_PAYLOAD, format="json")
-        dup_username = {**REGISTER_PAYLOAD, "email": "otra@example.com", "document_number": "1099887766"}
+        dup_username = {**REGISTER_PAYLOAD, "email": "otra@example.com"}
         response = self.client.post(self.url, dup_username, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("username", response.data)
@@ -528,20 +680,10 @@ class RegisterTests(APITestCase):
             **REGISTER_PAYLOAD,
             "username": "otra",
             "email": "OLIVIA@example.com",
-            "document_number": "1099887766",
         }
         response = self.client.post(self.url, dup_email, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("email", response.data)
-
-        dup_doc = {
-            **REGISTER_PAYLOAD,
-            "username": "otra",
-            "email": "otra@example.com",
-        }
-        response = self.client.post(self.url, dup_doc, format="json")
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("document_number", response.data)
 
     def test_register_password_mismatch_and_weak(self):
         payload = {**REGISTER_PAYLOAD, "password_confirm": "OtraClave123"}
@@ -550,21 +692,16 @@ class RegisterTests(APITestCase):
         self.assertIn("password_confirm", response.data)
 
         payload = {**REGISTER_PAYLOAD, "username": "debil", "email": "debil@example.com",
-                   "document_number": "1122334455", "password": "123", "password_confirm": "123"}
+                   "password": "123", "password_confirm": "123"}
         response = self.client.post(self.url, payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("password", response.data)
 
-    def test_register_rejects_letters_in_phone_and_document(self):
+    def test_register_rejects_letters_in_phone(self):
         payload = {**REGISTER_PAYLOAD, "phone": "300ABC4567"}
         response = self.client.post(self.url, payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("phone", response.data)
-
-        payload = {**REGISTER_PAYLOAD, "phone": "3001234567", "document_number": "12AB34"}
-        response = self.client.post(self.url, payload, format="json")
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("document_number", response.data)
 
 
 class ProfileMeTests(APITestCase):
@@ -572,7 +709,6 @@ class ProfileMeTests(APITestCase):
         self.user, self.token = make_user("perfil", email="perfil@example.com")
         self.user.profile.full_name = "Perfil Uno"
         self.user.profile.phone = "3001112233"
-        self.user.profile.document_number = "12345678"
         self.user.profile.address = "Bogotá"
         self.user.profile.save()
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
@@ -583,7 +719,7 @@ class ProfileMeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["username"], "perfil")
         self.assertEqual(response.data["full_name"], "Perfil Uno")
-        self.assertEqual(response.data["document_number"], "12345678")
+        self.assertNotIn("document_number", response.data)
 
     def test_patch_me(self):
         response = self.client.patch(
@@ -597,24 +733,46 @@ class ProfileMeTests(APITestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.email, "nuevo@example.com")
 
-    def test_cannot_change_document_or_username(self):
-        response = self.client.patch(self.url, {"document_number": "99999999"}, format="json")
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("document_number", response.data)
-
+    def test_cannot_change_username(self):
         response = self.client.patch(self.url, {"username": "hacker"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("username", response.data)
 
-    def test_same_document_and_username_are_ignored(self):
+    def test_same_username_is_ignored(self):
         response = self.client.patch(
             self.url,
-            {"document_number": "12345678", "username": "perfil", "full_name": "Sigue igual"},
+            {"username": "perfil", "full_name": "Sigue igual"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["full_name"], "Sigue igual")
         self.assertEqual(response.data["username"], "perfil")
+
+    def test_legacy_document_number_field_is_ignored(self):
+        response = self.client.patch(
+            self.url,
+            {"document_number": "99999999", "full_name": "Nombre Nuevo"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["full_name"], "Nombre Nuevo")
+
+    def test_get_me_includes_daily_hours_limit_default(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["daily_hours_limit"], 6)
+
+    def test_patch_me_updates_daily_hours_limit(self):
+        response = self.client.patch(self.url, {"daily_hours_limit": 3}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["daily_hours_limit"], 3)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.daily_hours_limit, 3)
+
+    def test_patch_me_rejects_daily_hours_limit_out_of_range(self):
+        response = self.client.patch(self.url, {"daily_hours_limit": 20}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("daily_hours_limit", response.data)
 
     def test_email_taken_by_other_user(self):
         make_user("otro", email="ocupado@example.com")
