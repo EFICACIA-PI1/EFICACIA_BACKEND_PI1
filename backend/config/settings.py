@@ -140,7 +140,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'es'
 
-TIME_ZONE = 'UTC'
+# Colombia (UTC-5): la vista Hoy y las fechas se interpretan en esta zona.
+TIME_ZONE = 'America/Bogota'
 
 USE_I18N = True
 

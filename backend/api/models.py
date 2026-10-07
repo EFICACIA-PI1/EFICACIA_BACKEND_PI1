@@ -152,7 +152,7 @@ class Task(models.Model):
 
 
 class Profile(models.Model):
-    """Datos de perfil del usuario (nombre, teléfono, dirección y cédula)."""
+    """Datos de perfil del usuario (nombre, teléfono, dirección y límite diario)."""
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -162,12 +162,21 @@ class Profile(models.Model):
     full_name = models.CharField(max_length=150, blank=True)
     phone = models.CharField(max_length=20, blank=True)
     address = models.CharField(max_length=255, blank=True)
-    document_number = models.CharField(max_length=20, unique=True, null=True, blank=True)
+    daily_hours_limit = models.PositiveSmallIntegerField(
+        default=6,
+        validators=[MinValueValidator(1), MaxValueValidator(16)],
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "api_profile"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(daily_hours_limit__gte=1) & models.Q(daily_hours_limit__lte=16),
+                name="profile_daily_hours_limit_range",
+            ),
+        ]
 
     def __str__(self):
         return self.full_name or self.user.username

@@ -6,7 +6,6 @@ from rest_framework import serializers
 User = get_user_model()
 
 PHONE_RE = re.compile(r"^\+?\d{7,15}$")
-DOCUMENT_RE = re.compile(r"^\d{6,12}$")
 
 
 def validate_full_name(value):
@@ -22,14 +21,6 @@ def validate_phone(value):
     if not PHONE_RE.fullmatch(value or ""):
         raise serializers.ValidationError(
             "El teléfono debe tener entre 7 y 15 dígitos, con un '+' opcional al inicio."
-        )
-    return value
-
-
-def validate_document_number(value):
-    if not DOCUMENT_RE.fullmatch(value or ""):
-        raise serializers.ValidationError(
-            "El número de documento debe tener entre 6 y 12 dígitos."
         )
     return value
 

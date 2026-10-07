@@ -1,8 +1,11 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.db import transaction
+from django.db.models import Sum
 from django.http import Http404
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
@@ -18,7 +21,7 @@ from rest_framework import generics, status
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import api_view
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import APIException, NotFound, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -47,6 +50,73 @@ PASSWORD_RESET_MESSAGE = (
     "Si el correo está registrado, te enviamos las instrucciones."
 )
 PASSWORD_RESET_INVALID = "El enlace de recuperación no es válido o ya expiró."
+
+
+class DailyOverloadConflict(APIException):
+    """409 estructurado cuando reprogramar deja el día sobrecargado.
+
+    Se evita la normalización de DRF (convierten números en ErrorDetail/string)
+    guardando el payload tal cual en `detail`.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "Conflicto de sobrecarga diaria."
+    default_code = "daily_overload"
+
+    def __init__(self, payload=None):
+        self.detail = payload if payload is not None else self.default_detail
+
+
+def _decimal(value):
+    return Decimal(str(value))
+
+
+def _format_hours(value):
+    text = format(_decimal(value).normalize(), "f")
+    return text
+
+
+def daily_overload_payload(task, user, new_due_date, new_hours):
+    """Calcula si reprogramar `task` a `new_due_date` con `new_hours` sobrecarga el día.
+
+    Reglas de suma: gestiones del mismo usuario con esa `due_date`, `state != "hecha"`
+    (incluye tareas y subtareas, y las pospuestas), excluyendo la tarea que se mueve.
+    Devuelve el payload del 409 o None si cabe en el límite diario.
+    """
+    limit = user.profile.daily_hours_limit
+    total_of_others = (
+        Task.objects.filter(
+            event__user=user,
+            due_date=new_due_date,
+        )
+        .exclude(state=Task.State.HECHA)
+        .exclude(pk=task.pk)
+        .aggregate(total=Sum("estimated_hours"))["total"]
+    )
+    others = _decimal(total_of_others or 0)
+    planned = others + _decimal(new_hours)
+    limit_decimal = _decimal(limit)
+
+    if planned <= limit_decimal:
+        return None
+
+    excess = planned - limit_decimal
+    max_for_task = limit_decimal - others
+    if max_for_task < 0:
+        max_for_task = Decimal("0")
+
+    return {
+        "detail": (
+            f"Quedarías con {_format_hours(planned)} h planificadas "
+            f"(límite {_format_hours(limit)} h) el {new_due_date}."
+        ),
+        "code": "daily_overload",
+        "date": str(new_due_date),
+        "planned_hours": float(planned),
+        "limit_hours": float(limit),
+        "excess_hours": float(excess),
+        "max_hours_for_this_task": float(max_for_task),
+    }
 
 
 @extend_schema(
@@ -102,7 +172,6 @@ def user_public_payload(user):
             "full_name": profile.full_name,
             "phone": profile.phone,
             "address": profile.address,
-            "document_number": profile.document_number,
         }
     ).data
 
@@ -156,8 +225,7 @@ class LoginView(ThrottledPublicAuthMixin, APIView):
     description=(
         "Crea un User y su Profile en una transacción, y devuelve el token "
         "para iniciar sesión de inmediato. El correo no distingue mayúsculas. "
-        "La cédula (`document_number`) y el nombre de usuario no se podrán "
-        "cambiar después."
+        "El nombre de usuario no se podrá cambiar después."
     ),
     request=RegisterSerializer,
     responses={
@@ -174,7 +242,6 @@ class LoginView(ThrottledPublicAuthMixin, APIView):
                 "password_confirm": "ClaveSegura123",
                 "full_name": "Olivia Ruiz",
                 "phone": "3001234567",
-                "document_number": "1020304050",
                 "address": "Cali",
             },
             request_only=True,
@@ -190,7 +257,6 @@ class LoginView(ThrottledPublicAuthMixin, APIView):
                     "full_name": "Olivia Ruiz",
                     "phone": "3001234567",
                     "address": "Cali",
-                    "document_number": "1020304050",
                 },
             },
             response_only=True,
@@ -214,7 +280,6 @@ class RegisterView(ThrottledPublicAuthMixin, APIView):
             profile = user.profile
             profile.full_name = data["full_name"]
             profile.phone = data["phone"]
-            profile.document_number = data["document_number"]
             profile.address = data.get("address") or ""
             profile.save()
             token = Token.objects.create(user=user)
@@ -239,7 +304,7 @@ class RegisterView(ThrottledPublicAuthMixin, APIView):
                     "full_name": "Olivia Ruiz",
                     "phone": "3001234567",
                     "address": "Cali",
-                    "document_number": "1020304050",
+                    "daily_hours_limit": 6,
                 },
                 response_only=True,
             ),
@@ -249,8 +314,9 @@ class RegisterView(ThrottledPublicAuthMixin, APIView):
         summary="Editar perfil",
         description=(
             "Actualización parcial. Se pueden cambiar `full_name`, `phone`, "
-            "`address` y `email`. `username` y `document_number` son de solo "
-            "lectura: si se envían con otro valor, la API responde 400."
+            "`address`, `email` y `daily_hours_limit` (límite diario de "
+            "trabajo, entre 1 y 16 horas). `username` es de solo lectura: si "
+            "se envía con otro valor, la API responde 400."
         ),
         request=MeSerializer,
         responses={200: MeSerializer, 400: OpenApiTypes.OBJECT, 401: OpenApiTypes.OBJECT},
@@ -262,6 +328,7 @@ class RegisterView(ThrottledPublicAuthMixin, APIView):
                     "phone": "+573001234567",
                     "address": "Cali",
                     "email": "olivia.ruiz@example.com",
+                    "daily_hours_limit": 4,
                 },
                 request_only=True,
             ),
@@ -521,7 +588,16 @@ class TaskListCreateView(AuthenticatedUserMixin, generics.ListCreateAPIView):
 @extend_schema_view(
     retrieve=extend_schema(summary="Detalle de tarea"),
     update=extend_schema(summary="Editar tarea (completo)", description="US-03."),
-    partial_update=extend_schema(summary="Editar tarea (parcial)", description="US-03."),
+    partial_update=extend_schema(
+        summary="Editar tarea (parcial) / reprogramar",
+        description=(
+            "Reprogramar: PATCH con `due_date` (y opcional `estimated_hours`). "
+            "Si el día queda sobrecargado, responde 409 con `code=\"daily_overload\"` "
+            "y no guarda. El 409 incluye `planned_hours`, `limit_hours`, "
+            "`excess_hours` y `max_hours_for_this_task`."
+        ),
+        responses={200: TaskSerializer, 409: OpenApiTypes.OBJECT},
+    ),
     destroy=extend_schema(summary="Eliminar tarea", description="US-03."),
 )
 class TaskDetailView(AuthenticatedUserMixin, FriendlyNotFoundMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -530,6 +606,17 @@ class TaskDetailView(AuthenticatedUserMixin, FriendlyNotFoundMixin, generics.Ret
 
     def get_queryset(self):
         return Task.objects.filter(event__user=self.request.user)
+
+    def perform_update(self, serializer):
+        incoming = serializer.validated_data or {}
+        if "due_date" in incoming or "estimated_hours" in incoming:
+            task = serializer.instance
+            new_due_date = incoming.get("due_date", task.due_date)
+            new_hours = incoming.get("estimated_hours", task.estimated_hours)
+            conflict = daily_overload_payload(task, self.request.user, new_due_date, new_hours)
+            if conflict is not None:
+                raise DailyOverloadConflict(conflict)
+        serializer.save()
 
 
 @extend_schema_view(
