@@ -3,10 +3,9 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
-from .models import Event, Profile, Task
+from .models import Event, Task
 from .validators import (
     normalize_email,
-    validate_document_number,
     validate_email_unique,
     validate_full_name,
     validate_phone,
@@ -33,7 +32,6 @@ class UserPublicSerializer(serializers.Serializer):
     full_name = serializers.CharField()
     phone = serializers.CharField()
     address = serializers.CharField(allow_blank=True)
-    document_number = serializers.CharField(allow_null=True)
 
 
 class RegisterResponseSerializer(serializers.Serializer):
@@ -48,7 +46,6 @@ class RegisterSerializer(serializers.Serializer):
     password_confirm = serializers.CharField(write_only=True, style={"input_type": "password"})
     full_name = serializers.CharField()
     phone = serializers.CharField()
-    document_number = serializers.CharField()
     address = serializers.CharField(required=False, allow_blank=True, default="", max_length=255)
 
     def validate_username(self, value):
@@ -65,12 +62,6 @@ class RegisterSerializer(serializers.Serializer):
 
     def validate_phone(self, value):
         return validate_phone(value)
-
-    def validate_document_number(self, value):
-        number = validate_document_number(value)
-        if Profile.objects.filter(document_number=number).exists():
-            raise serializers.ValidationError("Ya existe una cuenta con ese número de documento.")
-        return number
 
     def validate_password(self, value):
         try:
@@ -94,7 +85,7 @@ class MeSerializer(serializers.Serializer):
     full_name = serializers.CharField(required=False)
     phone = serializers.CharField(required=False)
     address = serializers.CharField(required=False, allow_blank=True, max_length=255)
-    document_number = serializers.CharField(read_only=True, allow_null=True)
+    daily_hours_limit = serializers.IntegerField(required=False, min_value=1, max_value=16)
 
     def to_representation(self, instance):
         profile = instance.profile
@@ -105,7 +96,7 @@ class MeSerializer(serializers.Serializer):
             "full_name": profile.full_name,
             "phone": profile.phone,
             "address": profile.address,
-            "document_number": profile.document_number,
+            "daily_hours_limit": profile.daily_hours_limit,
         }
 
     def validate_full_name(self, value):
@@ -120,9 +111,15 @@ class MeSerializer(serializers.Serializer):
     def validate_address(self, value):
         return value or ""
 
+    def validate_daily_hours_limit(self, value):
+        if not 1 <= value <= 16:
+            raise serializers.ValidationError(
+                "El límite diario debe estar entre 1 y 16 horas."
+            )
+        return value
+
     def validate(self, attrs):
         user = self.instance
-        profile = user.profile
         incoming = self.initial_data or {}
 
         if "username" in incoming:
@@ -132,14 +129,6 @@ class MeSerializer(serializers.Serializer):
                 )
             attrs.pop("username", None)
 
-        if "document_number" in incoming:
-            current = "" if profile.document_number is None else str(profile.document_number)
-            if str(incoming.get("document_number")) != current:
-                raise serializers.ValidationError(
-                    {"document_number": "El número de documento no se puede modificar."}
-                )
-            attrs.pop("document_number", None)
-
         return attrs
 
     def update(self, instance, validated_data):
@@ -148,7 +137,7 @@ class MeSerializer(serializers.Serializer):
             instance.email = validated_data["email"]
             instance.save(update_fields=["email"])
         profile_fields = []
-        for field in ("full_name", "phone", "address"):
+        for field in ("full_name", "phone", "address", "daily_hours_limit"):
             if field in validated_data:
                 setattr(profile, field, validated_data[field])
                 profile_fields.append(field)
@@ -239,7 +228,14 @@ class TaskSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "state", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_state(self, value):
+        if value not in Task.State.values:
+            raise serializers.ValidationError(
+                {"state": "Estado inválido. Use pendiente, hecha o pospuesta."}
+            )
+        return value
 
     def validate_name(self, value):
         if not value.strip():
