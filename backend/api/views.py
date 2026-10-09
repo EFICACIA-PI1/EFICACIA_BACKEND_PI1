@@ -76,6 +76,22 @@ def _format_hours(value):
     return text
 
 
+def planned_hours_for_date(user, due_date, exclude_task=None):
+    """Suma `estimated_hours` de las gestiones no hechas del usuario en una fecha.
+
+    Incluye tareas y subtareas de todos sus eventos (también las pospuestas).
+    Si `exclude_task` se indica, no cuenta esa tarea.
+    """
+    queryset = Task.objects.filter(
+        event__user=user,
+        due_date=due_date,
+    ).exclude(state=Task.State.HECHA)
+    if exclude_task is not None:
+        queryset = queryset.exclude(pk=exclude_task.pk)
+    total = queryset.aggregate(total=Sum("estimated_hours"))["total"]
+    return _decimal(total or 0)
+
+
 def daily_overload_payload(task, user, new_due_date, new_hours):
     """Calcula si reprogramar `task` a `new_due_date` con `new_hours` sobrecarga el día.
 
@@ -84,16 +100,7 @@ def daily_overload_payload(task, user, new_due_date, new_hours):
     Devuelve el payload del 409 o None si cabe en el límite diario.
     """
     limit = user.profile.daily_hours_limit
-    total_of_others = (
-        Task.objects.filter(
-            event__user=user,
-            due_date=new_due_date,
-        )
-        .exclude(state=Task.State.HECHA)
-        .exclude(pk=task.pk)
-        .aggregate(total=Sum("estimated_hours"))["total"]
-    )
-    others = _decimal(total_of_others or 0)
+    others = planned_hours_for_date(user, new_due_date, exclude_task=task)
     planned = others + _decimal(new_hours)
     limit_decimal = _decimal(limit)
 
@@ -117,6 +124,45 @@ def daily_overload_payload(task, user, new_due_date, new_hours):
         "excess_hours": float(excess),
         "max_hours_for_this_task": float(max_for_task),
     }
+
+
+def daily_limit_reduction_payload(user, new_limit):
+    """Mensaje de error si algún día futuro supera el nuevo límite diario.
+
+    Suma las gestiones no hechas (tareas y subtareas, pospuestas incluidas) de
+    todos los eventos del usuario, desde hoy (America/Bogota) en adelante. Si
+    hay días sobrecargados, devuelve el texto para el 400 ordenado por fecha
+    (hasta 3 días y "y N más"); si no, None.
+    """
+    today = timezone.localdate()
+    limit_decimal = _decimal(new_limit)
+    dates = (
+        Task.objects.filter(event__user=user, due_date__gte=today)
+        .exclude(state=Task.State.HECHA)
+        .values_list("due_date", flat=True)
+        .distinct()
+        .order_by("due_date")
+    )
+
+    overloaded = []
+    for due_date in dates:
+        total = planned_hours_for_date(user, due_date)
+        if total > limit_decimal:
+            overloaded.append((due_date, total))
+
+    if not overloaded:
+        return None
+
+    shown = overloaded[:3]
+    listing = ", ".join(
+        f"{due_date}: {_format_hours(total)} h" for due_date, total in shown
+    )
+    if len(overloaded) > len(shown):
+        listing += f" y {len(overloaded) - len(shown)} más"
+    return (
+        f"No puedes reducir el límite a {new_limit} h: tienes días con más "
+        f"horas planificadas ({listing})."
+    )
 
 
 @extend_schema(
@@ -172,6 +218,7 @@ def user_public_payload(user):
             "full_name": profile.full_name,
             "phone": profile.phone,
             "address": profile.address,
+            "daily_hours_limit": profile.daily_hours_limit,
         }
     ).data
 
@@ -281,6 +328,8 @@ class RegisterView(ThrottledPublicAuthMixin, APIView):
             profile.full_name = data["full_name"]
             profile.phone = data["phone"]
             profile.address = data.get("address") or ""
+            if data.get("daily_hours_limit") is not None:
+                profile.daily_hours_limit = data["daily_hours_limit"]
             profile.save()
             token = Token.objects.create(user=user)
         return Response(
@@ -346,6 +395,11 @@ class MeView(AuthenticatedUserMixin, APIView):
     def patch(self, request):
         serializer = MeSerializer(request.user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
+        new_limit = serializer.validated_data.get("daily_hours_limit")
+        if new_limit is not None:
+            conflict = daily_limit_reduction_payload(request.user, new_limit)
+            if conflict is not None:
+                raise ValidationError({"daily_hours_limit": [conflict]})
         serializer.save()
         return Response(MeSerializer(request.user).data)
 
@@ -609,8 +663,14 @@ class TaskDetailView(AuthenticatedUserMixin, FriendlyNotFoundMixin, generics.Ret
 
     def perform_update(self, serializer):
         incoming = serializer.validated_data or {}
-        if "due_date" in incoming or "estimated_hours" in incoming:
-            task = serializer.instance
+        task = serializer.instance
+        schedule_changed = (
+            "due_date" in incoming and incoming["due_date"] != task.due_date
+        ) or (
+            "estimated_hours" in incoming
+            and incoming["estimated_hours"] != task.estimated_hours
+        )
+        if schedule_changed:
             new_due_date = incoming.get("due_date", task.due_date)
             new_hours = incoming.get("estimated_hours", task.estimated_hours)
             conflict = daily_overload_payload(task, self.request.user, new_due_date, new_hours)
