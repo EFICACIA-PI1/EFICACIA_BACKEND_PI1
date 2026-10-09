@@ -213,6 +213,109 @@ class TaskAPITests(AuthenticatedAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("parent", response.data)
 
+    def test_create_subtask_after_parent_is_rejected(self):
+        parent = Task.objects.create(
+            event=self.event, name="Principal",
+            due_date="2026-11-01", estimated_hours=2,
+        )
+        payload = {
+            "name": "Sub tarde", "due_date": "2026-11-05", "estimated_hours": 1,
+            "type": "subtask", "parent": parent.id,
+        }
+        response = self.client.post(self.list_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("due_date", response.data)
+        self.assertEqual(
+            response.data["due_date"][0],
+            "La fecha de la subtarea no puede ser posterior a la de su "
+            "gestión principal (2026-11-01).",
+        )
+
+    def test_create_subtask_same_date_as_parent_is_allowed(self):
+        parent = Task.objects.create(
+            event=self.event, name="Principal",
+            due_date="2026-11-01", estimated_hours=2,
+        )
+        payload = {
+            "name": "Sub mismo día", "due_date": "2026-11-01", "estimated_hours": 1,
+            "type": "subtask", "parent": parent.id,
+        }
+        response = self.client.post(self.list_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_move_parent_before_pending_subtask_is_rejected(self):
+        parent = Task.objects.create(
+            event=self.event, name="Principal",
+            due_date="2026-11-10", estimated_hours=2,
+        )
+        Task.objects.create(
+            event=self.event, name="Sub pendiente",
+            due_date="2026-11-15", estimated_hours=1,
+            type=Task.TaskType.SUBTASK, parent=parent,
+        )
+        url = reverse("task-detail", args=[parent.id])
+        response = self.client.patch(url, {"due_date": "2026-11-05"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("due_date", response.data)
+        self.assertEqual(
+            response.data["due_date"][0],
+            'No puedes mover la fecha límite al 2026-11-05 porque 1 subtarea(s) '
+            'tienen fecha posterior: "Sub pendiente". Reprograma esas subtareas primero.',
+        )
+        parent.refresh_from_db()
+        self.assertEqual(parent.due_date.isoformat(), "2026-11-10")
+
+    def test_move_parent_to_same_date_as_subtask_is_allowed(self):
+        parent = Task.objects.create(
+            event=self.event, name="Principal",
+            due_date="2026-11-01", estimated_hours=2,
+        )
+        Task.objects.create(
+            event=self.event, name="Sub pendiente",
+            due_date="2026-11-15", estimated_hours=1,
+            type=Task.TaskType.SUBTASK, parent=parent,
+        )
+        url = reverse("task-detail", args=[parent.id])
+        response = self.client.patch(url, {"due_date": "2026-11-15"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        parent.refresh_from_db()
+        self.assertEqual(parent.due_date.isoformat(), "2026-11-15")
+
+    def test_move_parent_before_done_subtask_is_allowed(self):
+        parent = Task.objects.create(
+            event=self.event, name="Principal",
+            due_date="2026-11-01", estimated_hours=2,
+        )
+        Task.objects.create(
+            event=self.event, name="Sub hecha",
+            due_date="2026-11-15", estimated_hours=1,
+            type=Task.TaskType.SUBTASK, parent=parent,
+            state=Task.State.HECHA,
+        )
+        url = reverse("task-detail", args=[parent.id])
+        response = self.client.patch(url, {"due_date": "2026-11-05"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        parent.refresh_from_db()
+        self.assertEqual(parent.due_date.isoformat(), "2026-11-05")
+
+    def test_move_parent_lists_first_three_subtasks_and_more(self):
+        parent = Task.objects.create(
+            event=self.event, name="Principal",
+            due_date="2026-12-01", estimated_hours=1,
+        )
+        for index in range(4, 8):
+            Task.objects.create(
+                event=self.event, name=f"Sub {index}",
+                due_date=f"2026-12-{index:02d}", estimated_hours=1,
+                type=Task.TaskType.SUBTASK, parent=parent,
+            )
+        url = reverse("task-detail", args=[parent.id])
+        response = self.client.patch(url, {"due_date": "2026-11-01"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        message = response.data["due_date"][0]
+        self.assertIn('"Sub 4", "Sub 5", "Sub 6" y 1 más', message)
+        self.assertIn("porque 4 subtarea(s) tienen fecha posterior", message)
+
     def test_update_and_delete_task(self):
         task = Task.objects.create(
             event=self.event, name="Reservar salón",
@@ -367,6 +470,27 @@ class TaskReprogramTests(AuthenticatedAPITestCase):
         response = self.client.patch(self.url, {"name": "Renombrada"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["name"], "Renombrada")
+
+    def test_patch_only_estimated_hours_triggers_409(self):
+        response = self.client.patch(self.url, {"estimated_hours": 7}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "daily_overload")
+        self.assertEqual(response.data["date"], "2026-10-01")
+        self.mover.refresh_from_db()
+        self.assertEqual(float(self.mover.estimated_hours), 4.0)
+
+    def test_unchanged_schedule_on_full_day_does_not_check_overload(self):
+        self.mover.due_date = "2026-10-10"
+        self.mover.save(update_fields=["due_date"])
+        response = self.client.patch(
+            self.url,
+            {"name": "Renombrada", "due_date": "2026-10-10", "estimated_hours": "4.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.mover.refresh_from_db()
+        self.assertEqual(self.mover.name, "Renombrada")
+        self.assertEqual(self.mover.due_date.isoformat(), "2026-10-10")
 
     def test_reprogram_default_limit_comes_from_profile(self):
         self.user.profile.daily_hours_limit = 8
@@ -656,6 +780,44 @@ class RegisterTests(APITestCase):
         self.assertEqual(user.profile.full_name, "Olivia Ruiz")
         self.assertEqual(user.profile.phone, "3001234567")
 
+    def test_register_defaults_daily_hours_limit_to_six(self):
+        response = self.client.post(self.url, REGISTER_PAYLOAD, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["user"]["daily_hours_limit"], 6)
+        self.assertEqual(User.objects.get(username="olivia").profile.daily_hours_limit, 6)
+
+    def test_register_accepts_optional_daily_hours_limit(self):
+        payload = {
+            **REGISTER_PAYLOAD,
+            "username": "conlimite",
+            "email": "conlimite@example.com",
+            "daily_hours_limit": 3,
+        }
+        response = self.client.post(self.url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["user"]["daily_hours_limit"], 3)
+        self.assertEqual(User.objects.get(username="conlimite").profile.daily_hours_limit, 3)
+
+    def test_register_rejects_daily_hours_limit_out_of_range_as_me(self):
+        user, token = make_user("rangome")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+        me_response = self.client.patch(
+            reverse("auth-me"), {"daily_hours_limit": 20}, format="json"
+        )
+        self.assertEqual(me_response.status_code, status.HTTP_400_BAD_REQUEST)
+        me_message = me_response.data["daily_hours_limit"]
+        self.client.credentials()
+
+        payload = {
+            **REGISTER_PAYLOAD,
+            "username": "rangoreg",
+            "email": "rangoreg@example.com",
+            "daily_hours_limit": 20,
+        }
+        response = self.client.post(self.url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["daily_hours_limit"], me_message)
+
     def test_register_ignores_invalid_authorization_header(self):
         self.client.credentials(HTTP_AUTHORIZATION="Token inválido")
         response = self.client.post(self.url, REGISTER_PAYLOAD, format="json")
@@ -773,6 +935,65 @@ class ProfileMeTests(APITestCase):
         response = self.client.patch(self.url, {"daily_hours_limit": 20}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("daily_hours_limit", response.data)
+
+    def _make_planned_task(self, due_date, hours, state=Task.State.PENDIENTE):
+        event = make_event(self.user)
+        return Task.objects.create(
+            event=event, name="Plan", due_date=due_date,
+            estimated_hours=hours, state=state,
+        )
+
+    def test_patch_daily_limit_below_planned_hours_is_rejected(self):
+        tomorrow = timezone.localdate() + timedelta(days=1)
+        self._make_planned_task(tomorrow, 8)
+        response = self.client.patch(self.url, {"daily_hours_limit": 4}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("daily_hours_limit", response.data)
+        self.assertEqual(
+            response.data["daily_hours_limit"][0],
+            "No puedes reducir el límite a 4 h: tienes días con más horas "
+            f"planificadas ({tomorrow}: 8 h).",
+        )
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.daily_hours_limit, 6)
+
+    def test_patch_daily_limit_ignores_past_overloaded_day(self):
+        yesterday = timezone.localdate() - timedelta(days=1)
+        self._make_planned_task(yesterday, 8)
+        response = self.client.patch(self.url, {"daily_hours_limit": 4}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.daily_hours_limit, 4)
+
+    def test_patch_daily_limit_without_conflict_saves(self):
+        tomorrow = timezone.localdate() + timedelta(days=1)
+        self._make_planned_task(tomorrow, 2)
+        response = self.client.patch(self.url, {"daily_hours_limit": 4}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["daily_hours_limit"], 4)
+
+    def test_patch_daily_limit_lists_first_three_days_and_more(self):
+        today = timezone.localdate()
+        dates = [today + timedelta(days=offset) for offset in range(1, 5)]
+        for due_date in dates:
+            self._make_planned_task(due_date, 8)
+        response = self.client.patch(self.url, {"daily_hours_limit": 4}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["daily_hours_limit"][0],
+            "No puedes reducir el límite a 4 h: tienes días con más horas "
+            f"planificadas ({dates[0]}: 8 h, {dates[1]}: 8 h, {dates[2]}: 8 h y 1 más).",
+        )
+
+    def test_patch_daily_limit_ignores_done_and_past_tasks(self):
+        yesterday = timezone.localdate() - timedelta(days=1)
+        tomorrow = timezone.localdate() + timedelta(days=1)
+        self._make_planned_task(yesterday, 8)
+        self._make_planned_task(tomorrow, 8, state=Task.State.HECHA)
+        self._make_planned_task(timezone.localdate(), 1)
+        response = self.client.patch(self.url, {"daily_hours_limit": 4}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["daily_hours_limit"], 4)
 
     def test_email_taken_by_other_user(self):
         make_user("otro", email="ocupado@example.com")

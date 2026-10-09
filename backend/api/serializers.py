@@ -32,6 +32,7 @@ class UserPublicSerializer(serializers.Serializer):
     full_name = serializers.CharField()
     phone = serializers.CharField()
     address = serializers.CharField(allow_blank=True)
+    daily_hours_limit = serializers.IntegerField()
 
 
 class RegisterResponseSerializer(serializers.Serializer):
@@ -47,6 +48,7 @@ class RegisterSerializer(serializers.Serializer):
     full_name = serializers.CharField()
     phone = serializers.CharField()
     address = serializers.CharField(required=False, allow_blank=True, default="", max_length=255)
+    daily_hours_limit = serializers.IntegerField(required=False, min_value=1, max_value=16)
 
     def validate_username(self, value):
         username = value.strip()
@@ -247,6 +249,54 @@ class TaskSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Las horas estimadas deben ser mayores a 0.")
         return value
 
+    def _due_date_changed(self, attrs):
+        """True solo si `due_date` viene en el payload y cambia respecto a lo guardado."""
+        if "due_date" not in attrs:
+            return False
+        if self.instance is None:
+            return True
+        return attrs["due_date"] != self.instance.due_date
+
+    def _validate_hierarchy_dates(self, attrs, task_type, parent):
+        if not self._due_date_changed(attrs):
+            return
+        new_due_date = attrs["due_date"]
+
+        if task_type == Task.TaskType.SUBTASK and parent is not None:
+            if new_due_date > parent.due_date:
+                raise serializers.ValidationError(
+                    {
+                        "due_date": (
+                            "La fecha de la subtarea no puede ser posterior a la de su "
+                            f"gestión principal ({parent.due_date})."
+                        )
+                    }
+                )
+            return
+
+        if task_type == Task.TaskType.TASK and self.instance is not None:
+            pending = (
+                self.instance.subtasks.exclude(state=Task.State.HECHA)
+                .filter(due_date__gt=new_due_date)
+                .order_by("due_date", "id")
+            )
+            count = pending.count()
+            if count == 0:
+                return
+            names = [subtask.name for subtask in pending[:3]]
+            listing = ", ".join(f'"{name}"' for name in names)
+            if count > len(names):
+                listing += f" y {count - len(names)} más"
+            raise serializers.ValidationError(
+                {
+                    "due_date": (
+                        f"No puedes mover la fecha límite al {new_due_date} porque "
+                        f"{count} subtarea(s) tienen fecha posterior: {listing}. "
+                        "Reprograma esas subtareas primero."
+                    )
+                }
+            )
+
     def validate(self, attrs):
         task_type = attrs.get("type", getattr(self.instance, "type", None) or Task.TaskType.TASK)
         parent = attrs.get("parent", getattr(self.instance, "parent", None))
@@ -269,6 +319,8 @@ class TaskSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"parent": "La tarea padre debe pertenecer al mismo evento."}
             )
+
+        self._validate_hierarchy_dates(attrs, task_type, parent)
 
         return attrs
 
