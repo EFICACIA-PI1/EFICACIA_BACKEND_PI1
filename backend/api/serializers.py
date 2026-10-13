@@ -1,6 +1,8 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from .models import Event, Task
@@ -195,6 +197,8 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 
 class EventSerializer(serializers.ModelSerializer):
+    progress = serializers.SerializerMethodField()
+
     class Meta:
         model = Event
         fields = [
@@ -206,13 +210,55 @@ class EventSerializer(serializers.ModelSerializer):
             "location",
             "created_at",
             "updated_at",
+            "progress",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    @extend_schema_field({"type": "object", "properties": {
+        "hechas": {"type": "integer"},
+        "total": {"type": "integer"},
+        "porcentaje": {"type": "integer"},
+    }})
+    def get_progress(self, instance):
+        total = getattr(instance, "task_total", None)
+        hechas = getattr(instance, "task_done", None)
+        if total is None:
+            tasks = instance.tasks.all()
+            total = tasks.count()
+            hechas = tasks.filter(state=Task.State.HECHA).count()
+        porcentaje = round((hechas * 100) / total) if total else 0
+        return {"hechas": hechas, "total": total, "porcentaje": porcentaje}
 
     def validate_name(self, value):
         if not value.strip():
             raise serializers.ValidationError("El nombre del evento no puede estar vacío.")
         return value
+
+    def validate(self, attrs):
+        if "event_date" not in attrs or self.instance is None:
+            return attrs
+
+        new_event_date = timezone.localtime(attrs["event_date"]).date()
+        later_tasks = (
+            self.instance.tasks.filter(due_date__gt=new_event_date)
+            .order_by("due_date", "id")
+        )
+        count = later_tasks.count()
+        if count == 0:
+            return attrs
+        names = [task.name for task in later_tasks[:3]]
+        listing = ", ".join(f'"{name}"' for name in names)
+        if count > len(names):
+            listing += f" y {count - len(names)} más"
+        raise serializers.ValidationError(
+            {
+                "event_date": (
+                    f"No puedes mover la fecha del evento al {new_event_date} porque "
+                    f"{count} gestión(es) tienen fecha posterior: {listing}. "
+                    "Reprograma esas gestiones primero."
+                )
+            }
+        )
 
 
 class TaskSerializer(serializers.ModelSerializer):
@@ -224,13 +270,15 @@ class TaskSerializer(serializers.ModelSerializer):
             "description",
             "due_date",
             "estimated_hours",
+            "note",
             "state",
+            "done_at",
             "type",
             "parent",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at", "done_at"]
 
     def validate_state(self, value):
         if value not in Task.State.values:
@@ -238,6 +286,16 @@ class TaskSerializer(serializers.ModelSerializer):
                 {"state": "Estado inválido. Use pendiente, hecha o pospuesta."}
             )
         return value
+
+    def create(self, validated_data):
+        if validated_data.get("state") == Task.State.HECHA:
+            validated_data["done_at"] = timezone.now()
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if validated_data.get("state") == Task.State.HECHA and instance.state != Task.State.HECHA:
+            validated_data["done_at"] = timezone.now()
+        return super().update(instance, validated_data)
 
     def validate_name(self, value):
         if not value.strip():
@@ -338,3 +396,11 @@ class HoyResponseSerializer(serializers.Serializer):
     vencidas = TaskSerializer(many=True)
     para_hoy = TaskSerializer(many=True)
     proximas = TaskSerializer(many=True)
+
+
+class ProgressSerializer(serializers.Serializer):
+    """El progreso cuenta todas las tareas y subtareas del alcance indicado."""
+
+    hechas = serializers.IntegerField()
+    total = serializers.IntegerField()
+    porcentaje = serializers.IntegerField()
