@@ -106,6 +106,100 @@ class EventAPITests(AuthenticatedAPITestCase):
         event.refresh_from_db()
         self.assertEqual(event.location, "Salón nuevo")
 
+    def test_move_event_before_pending_task_is_rejected(self):
+        event = make_event(self.user)
+        Task.objects.create(
+            event=event, name="Tarea posterior",
+            due_date="2026-10-10", estimated_hours=1,
+        )
+        response = self.client.patch(
+            reverse("event-detail", args=[event.id]),
+            {"event_date": "2026-10-09T18:00:00Z"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("event_date", response.data)
+        self.assertIn("1 gestión(es) tienen fecha posterior", response.data["event_date"][0])
+        event.refresh_from_db()
+        self.assertEqual(event.event_date.date().isoformat(), "2026-12-01")
+
+    def test_move_event_to_date_after_tasks_is_allowed(self):
+        event = make_event(self.user)
+        Task.objects.create(
+            event=event, name="Tarea válida",
+            due_date="2026-10-10", estimated_hours=1,
+        )
+        response = self.client.patch(
+            reverse("event-detail", args=[event.id]),
+            {"event_date": "2026-10-11T18:00:00Z"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_event_cannot_be_before_its_subtasks(self):
+        event = make_event(self.user)
+        parent = Task.objects.create(
+            event=event, name="Gestión principal",
+            due_date="2026-10-15", estimated_hours=1,
+        )
+        for day in (12, 14, 15):
+            Task.objects.create(
+                event=event,
+                name=f"Subtarea del {day}",
+                due_date=f"2026-10-{day:02d}",
+                estimated_hours=1,
+                type=Task.TaskType.SUBTASK,
+                parent=parent,
+            )
+
+        url = reverse("event-detail", args=[event.id])
+        blocked = self.client.patch(
+            url, {"event_date": "2026-10-14T18:00:00Z"}, format="json"
+        )
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("2 gestión(es) tienen fecha posterior", blocked.data["event_date"][0])
+        self.assertIn('"Subtarea del 15"', blocked.data["event_date"][0])
+        event.refresh_from_db()
+        self.assertEqual(event.event_date.date().isoformat(), "2026-12-01")
+
+        allowed = self.client.patch(
+            url, {"event_date": "2026-10-15T18:00:00Z"}, format="json"
+        )
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+
+    def test_event_progress_is_returned_in_list_and_detail(self):
+        event = make_event(self.user)
+        for index in range(2):
+            Task.objects.create(
+                event=event, name=f"Hecha {index}", due_date="2026-11-01",
+                estimated_hours=1, state=Task.State.HECHA,
+            )
+        for index in range(2):
+            Task.objects.create(
+                event=event, name=f"Pendiente {index}", due_date="2026-11-01",
+                estimated_hours=1,
+            )
+        list_response = self.client.get(reverse("event-list-create"))
+        self.assertEqual(list_response.data[0]["progress"], {"hechas": 2, "total": 4, "porcentaje": 50})
+        detail_response = self.client.get(reverse("event-detail", args=[event.id]))
+        self.assertEqual(detail_response.data["progress"], {"hechas": 2, "total": 4, "porcentaje": 50})
+
+    def test_overall_progress_is_scoped_to_authenticated_user(self):
+        event = make_event(self.user)
+        Task.objects.create(
+            event=event, name="Hecha", due_date="2026-11-01",
+            estimated_hours=1, state=Task.State.HECHA,
+        )
+        Task.objects.create(event=event, name="Pendiente", due_date="2026-11-01", estimated_hours=1)
+        other_user, _token = make_user("progreso_ajeno")
+        other_event = make_event(other_user)
+        Task.objects.create(
+            event=other_event, name="Ajena hecha", due_date="2026-11-01",
+            estimated_hours=1, state=Task.State.HECHA,
+        )
+        response = self.client.get(reverse("event-progress"))
+        self.assertEqual(response.data, {"hechas": 1, "total": 2, "porcentaje": 50})
+
     def test_delete_event_then_404(self):
         event = make_event(self.user)
         url = reverse("event-detail", args=[event.id])
@@ -344,6 +438,25 @@ class TaskAPITests(AuthenticatedAPITestCase):
         self.assertEqual(response.data["state"], "hecha")
         task.refresh_from_db()
         self.assertEqual(task.state, Task.State.HECHA)
+        self.assertIsNotNone(task.done_at)
+
+    def test_postponed_note_is_kept_when_task_is_done(self):
+        task = Task.objects.create(
+            event=self.event, name="Con nota", due_date="2026-11-01", estimated_hours=3,
+        )
+        url = reverse("task-detail", args=[task.id])
+        postponed = self.client.patch(
+            url, {"state": "pospuesta", "note": "Esperando confirmación"}, format="json"
+        )
+        self.assertEqual(postponed.status_code, status.HTTP_200_OK)
+        self.assertEqual(postponed.data["note"], "Esperando confirmación")
+        done = self.client.patch(url, {"state": "hecha"}, format="json")
+        self.assertEqual(done.status_code, status.HTTP_200_OK)
+        self.assertEqual(done.data["note"], "Esperando confirmación")
+        self.assertIsNotNone(done.data["done_at"])
+        task.refresh_from_db()
+        self.assertEqual(task.note, "Esperando confirmación")
+        self.assertIsNotNone(task.done_at)
 
     def test_mark_overdue_task_done_keeps_hecha_state(self):
         task = Task.objects.create(
@@ -401,6 +514,40 @@ class TaskReprogramTests(AuthenticatedAPITestCase):
         self.assertIn("Quedarías con 7 h planificadas (límite 6 h) el 2026-10-10.", response.data["detail"])
         self.mover.refresh_from_db()
         self.assertEqual(self.mover.due_date.isoformat(), "2026-10-01")
+
+    def test_reprogram_overload_suggests_closest_available_day(self):
+        today = timezone.localdate()
+        self.event.event_date = timezone.now() + timedelta(days=3)
+        self.event.save(update_fields=["event_date"])
+        self.mover.due_date = today
+        self.mover.save(update_fields=["due_date"])
+        self.ocupante.due_date = today
+        self.ocupante.estimated_hours = 6
+        self.ocupante.save(update_fields=["due_date", "estimated_hours"])
+        target = today + timedelta(days=2)
+        Task.objects.create(
+            event=self.event, name="Ocupante destino", due_date=target, estimated_hours=3,
+        )
+        response = self.client.patch(self.url, {"due_date": target}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["suggested_day"], str(today + timedelta(days=1)))
+
+    def test_reprogram_overload_has_no_suggested_day_when_all_days_are_full(self):
+        today = timezone.localdate()
+        self.event.event_date = timezone.now() + timedelta(days=1)
+        self.event.save(update_fields=["event_date"])
+        self.mover.due_date = today
+        self.mover.save(update_fields=["due_date"])
+        self.ocupante.due_date = today
+        self.ocupante.estimated_hours = 6
+        self.ocupante.save(update_fields=["due_date", "estimated_hours"])
+        tomorrow = today + timedelta(days=1)
+        Task.objects.create(
+            event=self.event, name="Ocupante mañana", due_date=tomorrow, estimated_hours=6,
+        )
+        response = self.client.patch(self.url, {"due_date": tomorrow}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIsNone(response.data["suggested_day"])
 
     def test_reprogram_fits_saves(self):
         response = self.client.patch(self.url, {"due_date": "2026-10-11"}, format="json")

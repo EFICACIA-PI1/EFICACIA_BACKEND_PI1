@@ -114,7 +114,9 @@ class Task(models.Model):
         decimal_places=2,
         validators=[MinValueValidator(Decimal("0.1"))],
     )
+    note = models.TextField(blank=True, default="")
     state = models.CharField(max_length=20, choices=State.choices, default=State.PENDIENTE)
+    done_at = models.DateTimeField(null=True, blank=True)
     type = models.CharField(max_length=20, choices=TaskType.choices, default=TaskType.TASK)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
