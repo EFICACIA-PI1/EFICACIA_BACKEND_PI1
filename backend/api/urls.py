@@ -17,6 +17,7 @@ urlpatterns = [
     path("auth/logout/", views.LogoutView.as_view(), name="auth-logout"),
     path("hoy/", views.HoyView.as_view(), name="hoy"),
     path("events/", views.EventListCreateView.as_view(), name="event-list-create"),
+    path("events/progress/", views.EventProgressView.as_view(), name="event-progress"),
     path("events/<int:pk>/", views.EventDetailView.as_view(), name="event-detail"),
     path(
         "events/<int:event_id>/tasks/",

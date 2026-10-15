@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -5,7 +6,7 @@ from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Count, Q, Sum
 from django.http import Http404
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
@@ -41,6 +42,7 @@ from .serializers import (
     RegisterResponseSerializer,
     RegisterSerializer,
     TaskSerializer,
+    ProgressSerializer,
     UserPublicSerializer,
 )
 
@@ -92,12 +94,26 @@ def planned_hours_for_date(user, due_date, exclude_task=None):
     return _decimal(total or 0)
 
 
+def planned_hours_by_date(user, start_date, end_date, exclude_task=None):
+    """Agrega en una sola consulta las horas no hechas por fecha."""
+    queryset = Task.objects.filter(
+        event__user=user,
+        due_date__range=(start_date, end_date),
+    ).exclude(state=Task.State.HECHA)
+    if exclude_task is not None:
+        queryset = queryset.exclude(pk=exclude_task.pk)
+    rows = queryset.values("due_date").annotate(total=Sum("estimated_hours"))
+    return {row["due_date"]: _decimal(row["total"]) for row in rows}
+
+
 def daily_overload_payload(task, user, new_due_date, new_hours):
-    """Calcula si reprogramar `task` a `new_due_date` con `new_hours` sobrecarga el día.
+    """Calcula si reprogramar una tarea deja el día sobrecargado.
 
     Reglas de suma: gestiones del mismo usuario con esa `due_date`, `state != "hecha"`
     (incluye tareas y subtareas, y las pospuestas), excluyendo la tarea que se mueve.
-    Devuelve el payload del 409 o None si cabe en el límite diario.
+    Si hay conflicto, sugiere primero el día libre más cercano hacia adelante
+    desde el día posterior al conflicto y, como respaldo, el día libre anterior
+    más cercano. Nunca sugiere el día actual de la tarea.
     """
     limit = user.profile.daily_hours_limit
     others = planned_hours_for_date(user, new_due_date, exclude_task=task)
@@ -112,6 +128,36 @@ def daily_overload_payload(task, user, new_due_date, new_hours):
     if max_for_task < 0:
         max_for_task = Decimal("0")
 
+    suggested_day = None
+    event_date = timezone.localtime(task.event.event_date).date()
+    today = timezone.localdate()
+    if event_date >= today:
+        hours_by_date = planned_hours_by_date(
+            user, today, event_date, exclude_task=task
+        )
+
+        def fits(candidate):
+            return (
+                candidate != task.due_date
+                and hours_by_date.get(candidate, Decimal("0")) + _decimal(new_hours)
+                <= limit_decimal
+            )
+
+        candidate = max(new_due_date + timedelta(days=1), today)
+        while candidate <= event_date:
+            if fits(candidate):
+                suggested_day = str(candidate)
+                break
+            candidate += timedelta(days=1)
+
+        if suggested_day is None:
+            candidate = min(new_due_date - timedelta(days=1), event_date)
+            while candidate >= today:
+                if fits(candidate):
+                    suggested_day = str(candidate)
+                    break
+                candidate -= timedelta(days=1)
+
     return {
         "detail": (
             f"Quedarías con {_format_hours(planned)} h planificadas "
@@ -123,7 +169,16 @@ def daily_overload_payload(task, user, new_due_date, new_hours):
         "limit_hours": float(limit),
         "excess_hours": float(excess),
         "max_hours_for_this_task": float(max_for_task),
+        "suggested_day": suggested_day,
     }
+
+
+def events_with_progress(user):
+    """Anota progreso contando todas las tareas y subtareas de cada evento."""
+    return Event.objects.filter(user=user).annotate(
+        task_total=Count("tasks"),
+        task_done=Count("tasks", filter=Q(tasks__state=Task.State.HECHA)),
+    )
 
 
 def daily_limit_reduction_payload(user, new_limit):
@@ -566,7 +621,10 @@ class LogoutView(AuthenticatedUserMixin, APIView):
 @extend_schema_view(
     list=extend_schema(
         summary="Listar eventos",
-        description="Lista los eventos del usuario autenticado.",
+        description=(
+            "Lista los eventos del usuario autenticado. Cada evento incluye "
+            "progreso (`hechas`, `total`, `porcentaje`) contando tareas y subtareas."
+        ),
     ),
     create=extend_schema(
         summary="Crear evento",
@@ -577,7 +635,7 @@ class EventListCreateView(AuthenticatedUserMixin, generics.ListCreateAPIView):
     serializer_class = EventSerializer
 
     def get_queryset(self):
-        return Event.objects.filter(user=self.request.user)
+        return events_with_progress(self.request.user)
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -586,7 +644,11 @@ class EventListCreateView(AuthenticatedUserMixin, generics.ListCreateAPIView):
 @extend_schema_view(
     retrieve=extend_schema(
         summary="Detalle de evento",
-        description="US-01: detalle de un evento, incluye sus tareas anidadas (`tasks`).",
+        description=(
+            "US-01: detalle de un evento, incluye sus tareas anidadas (`tasks`) y "
+            "progreso (`hechas`, `total`, `porcentaje`). El progreso cuenta todas "
+            "las tareas y subtareas."
+        ),
     ),
     update=extend_schema(summary="Editar evento (completo)", description="US-03."),
     partial_update=extend_schema(summary="Editar evento (parcial)", description="US-03."),
@@ -597,7 +659,29 @@ class EventDetailView(AuthenticatedUserMixin, FriendlyNotFoundMixin, generics.Re
     not_found_message = "Evento no encontrado."
 
     def get_queryset(self):
-        return Event.objects.filter(user=self.request.user)
+        return events_with_progress(self.request.user)
+
+
+@extend_schema(
+    summary="Progreso global del organizador",
+    description="Cuenta todas las tareas y subtareas de todos los eventos del usuario autenticado.",
+    responses={200: ProgressSerializer},
+)
+class EventProgressView(AuthenticatedUserMixin, APIView):
+    def get(self, request):
+        totals = Task.objects.filter(event__user=request.user).aggregate(
+            total=Count("id"),
+            hechas=Count("id", filter=Q(state=Task.State.HECHA)),
+        )
+        total = totals["total"] or 0
+        hechas = totals["hechas"] or 0
+        return Response(
+            {
+                "hechas": hechas,
+                "total": total,
+                "porcentaje": round((hechas * 100) / total) if total else 0,
+            }
+        )
 
 
 @extend_schema_view(
@@ -640,15 +724,27 @@ class TaskListCreateView(AuthenticatedUserMixin, generics.ListCreateAPIView):
 
 
 @extend_schema_view(
-    retrieve=extend_schema(summary="Detalle de tarea"),
-    update=extend_schema(summary="Editar tarea (completo)", description="US-03."),
+    retrieve=extend_schema(
+        summary="Detalle de tarea",
+        description="Incluye `note` y `done_at`; al marcar `hecha`, el servidor llena `done_at`.",
+    ),
+    update=extend_schema(
+        summary="Editar tarea (completo)",
+        description=(
+            "US-03. `state` acepta únicamente `pendiente`, `hecha` o `pospuesta`. "
+            "La nota se conserva al cambiar de estado."
+        ),
+    ),
     partial_update=extend_schema(
         summary="Editar tarea (parcial) / reprogramar",
         description=(
             "Reprogramar: PATCH con `due_date` (y opcional `estimated_hours`). "
             "Si el día queda sobrecargado, responde 409 con `code=\"daily_overload\"` "
             "y no guarda. El 409 incluye `planned_hours`, `limit_hours`, "
-            "`excess_hours` y `max_hours_for_this_task`."
+            "`excess_hours`, `max_hours_for_this_task` y `suggested_day`. "
+            "`suggested_day` busca primero desde el día posterior al conflicto "
+            "hasta la fecha del evento, y luego hacia atrás como respaldo; "
+            "puede ser `null`."
         ),
         responses={200: TaskSerializer, 409: OpenApiTypes.OBJECT},
     ),

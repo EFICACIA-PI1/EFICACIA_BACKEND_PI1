@@ -77,6 +77,7 @@ Todas las respuestas son JSON. Errores de validación devuelven `400` con un obj
 | GET | `/api/events/` | Lista los eventos del usuario autenticado |
 | POST | `/api/events/` | Crea un evento (US-01) |
 | GET | `/api/events/<id>/` | Detalle de un evento, incluye sus tareas (`tasks`) |
+| GET | `/api/events/progress/` | Progreso global de tareas del usuario autenticado |
 | PUT/PATCH | `/api/events/<id>/` | Edita un evento (US-03) |
 | DELETE | `/api/events/<id>/` | Elimina un evento (US-03) |
 | GET | `/api/events/<id>/tasks/` | Lista las tareas/subtareas de un evento |
@@ -91,6 +92,8 @@ Todas las respuestas son JSON. Errores de validación devuelven `400` con un obj
 
 ### Campos de Task
 
-`name`, `due_date` (fecha), `estimated_hours` (> 0), `description` (opcional). `type` es `"task"` (gestión de nivel superior, valor por defecto) o `"subtask"` (paso dentro de una tarea); si es `"subtask"` requiere `parent` con el id de una tarea `"task"` del mismo evento. `state` (`pendiente`/`hecha`/`pospuesta`) y `event` no se envían al crear: los asigna el servidor. Las tareas heredan la propiedad del evento.
+`name`, `due_date` (fecha), `estimated_hours` (> 0), `description` (opcional) y `note` (opcional). `type` es `"task"` (gestión de nivel superior, valor por defecto) o `"subtask"` (paso dentro de una tarea); si es `"subtask"` requiere `parent` con el id de una tarea `"task"` del mismo evento. `state` (`pendiente`/`hecha`/`pospuesta`) y `event` no se envían al crear: los asigna el servidor. Al pasar a `hecha`, el servidor llena `done_at`; la nota se conserva entre estados. Las tareas `pospuesta` siguen visibles en `/api/hoy/` y cuentan para el límite diario hasta ser reprogramadas. Las tareas heredan la propiedad del evento.
+
+Cada evento incluye `progress` con `{hechas, total, porcentaje}`. Cuenta todas sus tareas y subtareas; un evento sin tareas devuelve `0/0` y `0%`. El endpoint `/api/events/progress/` devuelve el mismo objeto agregado para todos los eventos del usuario.
 
 La recuperación y el contrato completo de request/response están documentados en Swagger (`/api/docs/`) y ReDoc (`/api/redoc/`).
