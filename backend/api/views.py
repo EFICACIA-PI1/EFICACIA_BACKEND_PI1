@@ -94,12 +94,26 @@ def planned_hours_for_date(user, due_date, exclude_task=None):
     return _decimal(total or 0)
 
 
+def planned_hours_by_date(user, start_date, end_date, exclude_task=None):
+    """Agrega en una sola consulta las horas no hechas por fecha."""
+    queryset = Task.objects.filter(
+        event__user=user,
+        due_date__range=(start_date, end_date),
+    ).exclude(state=Task.State.HECHA)
+    if exclude_task is not None:
+        queryset = queryset.exclude(pk=exclude_task.pk)
+    rows = queryset.values("due_date").annotate(total=Sum("estimated_hours"))
+    return {row["due_date"]: _decimal(row["total"]) for row in rows}
+
+
 def daily_overload_payload(task, user, new_due_date, new_hours):
-    """Calcula si reprogramar `task` a `new_due_date` con `new_hours` sobrecarga el día.
+    """Calcula si reprogramar una tarea deja el día sobrecargado.
 
     Reglas de suma: gestiones del mismo usuario con esa `due_date`, `state != "hecha"`
     (incluye tareas y subtareas, y las pospuestas), excluyendo la tarea que se mueve.
-    Devuelve el payload del 409 o None si cabe en el límite diario.
+    Si hay conflicto, sugiere primero el día libre más cercano hacia adelante
+    desde el día posterior al conflicto y, como respaldo, el día libre anterior
+    más cercano. Nunca sugiere el día actual de la tarea.
     """
     limit = user.profile.daily_hours_limit
     others = planned_hours_for_date(user, new_due_date, exclude_task=task)
@@ -118,12 +132,31 @@ def daily_overload_payload(task, user, new_due_date, new_hours):
     event_date = timezone.localtime(task.event.event_date).date()
     today = timezone.localdate()
     if event_date >= today:
-        candidate = today
+        hours_by_date = planned_hours_by_date(
+            user, today, event_date, exclude_task=task
+        )
+
+        def fits(candidate):
+            return (
+                candidate != task.due_date
+                and hours_by_date.get(candidate, Decimal("0")) + _decimal(new_hours)
+                <= limit_decimal
+            )
+
+        candidate = max(new_due_date + timedelta(days=1), today)
         while candidate <= event_date:
-            if planned_hours_for_date(user, candidate, exclude_task=task) + _decimal(new_hours) <= limit_decimal:
+            if fits(candidate):
                 suggested_day = str(candidate)
                 break
             candidate += timedelta(days=1)
+
+        if suggested_day is None:
+            candidate = min(new_due_date - timedelta(days=1), event_date)
+            while candidate >= today:
+                if fits(candidate):
+                    suggested_day = str(candidate)
+                    break
+                candidate -= timedelta(days=1)
 
     return {
         "detail": (
@@ -708,9 +741,10 @@ class TaskListCreateView(AuthenticatedUserMixin, generics.ListCreateAPIView):
             "Reprogramar: PATCH con `due_date` (y opcional `estimated_hours`). "
             "Si el día queda sobrecargado, responde 409 con `code=\"daily_overload\"` "
             "y no guarda. El 409 incluye `planned_hours`, `limit_hours`, "
-            "`excess_hours`, `max_hours_for_this_task` y `suggested_day` (el día "
-            "más cercano entre hoy y la fecha del evento que no sobrecarga el "
-            "límite, o `null`)."
+            "`excess_hours`, `max_hours_for_this_task` y `suggested_day`. "
+            "`suggested_day` busca primero desde el día posterior al conflicto "
+            "hasta la fecha del evento, y luego hacia atrás como respaldo; "
+            "puede ser `null`."
         ),
         responses={200: TaskSerializer, 409: OpenApiTypes.OBJECT},
     ),
