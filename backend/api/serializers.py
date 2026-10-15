@@ -235,6 +235,13 @@ class EventSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        if "event_date" in attrs and self.instance is None:
+            event_date = timezone.localtime(attrs["event_date"]).date()
+            if event_date < timezone.localdate():
+                raise serializers.ValidationError(
+                    {"event_date": "La fecha del evento no puede estar en el pasado."}
+                )
+
         if "event_date" not in attrs or self.instance is None:
             return attrs
 
@@ -356,6 +363,11 @@ class TaskSerializer(serializers.ModelSerializer):
             )
 
     def validate(self, attrs):
+        if self.instance is None and attrs.get("due_date") < timezone.localdate():
+            raise serializers.ValidationError(
+                {"due_date": "La fecha límite no puede estar en el pasado."}
+            )
+
         task_type = attrs.get("type", getattr(self.instance, "type", None) or Task.TaskType.TASK)
         parent = attrs.get("parent", getattr(self.instance, "parent", None))
 

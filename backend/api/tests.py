@@ -74,6 +74,22 @@ class EventAPITests(AuthenticatedAPITestCase):
         self.assertEqual(Event.objects.count(), 1)
         self.assertEqual(Event.objects.get().user, self.user)
 
+    def test_create_event_in_the_past_is_rejected(self):
+        response = self.client.post(
+            reverse("event-list-create"),
+            {
+                "name": "Evento pasado",
+                "event_type": "otro",
+                "client_contact": "Contacto",
+                "event_date": (timezone.now() - timedelta(days=1)).isoformat(),
+                "location": "Lugar de prueba",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("event_date", response.data)
+        self.assertEqual(Event.objects.count(), 0)
+
     def test_create_event_missing_name_is_rejected(self):
         url = reverse("event-list-create")
         payload = {
@@ -241,6 +257,20 @@ class TaskAPITests(AuthenticatedAPITestCase):
         self.assertEqual(response.data["type"], "task")
         self.assertEqual(response.data["state"], "pendiente")
         self.assertIsNone(response.data["parent"])
+
+    def test_create_task_due_yesterday_is_rejected(self):
+        response = self.client.post(
+            self.list_url,
+            {
+                "name": "Tarea vencida",
+                "due_date": (timezone.localdate() - timedelta(days=1)).isoformat(),
+                "estimated_hours": 1,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("due_date", response.data)
+        self.assertEqual(self.event.tasks.count(), 0)
 
     def test_create_task_missing_name_is_rejected(self):
         payload = {"name": "", "due_date": "2026-11-01", "estimated_hours": 4}
