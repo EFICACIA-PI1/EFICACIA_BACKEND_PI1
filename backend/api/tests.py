@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
@@ -13,6 +13,7 @@ from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase
+from unittest.mock import patch
 
 from .models import Event, Organizer, Profile, Task
 
@@ -135,6 +136,20 @@ class EventAPITests(AuthenticatedAPITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_event_date_validation_uses_colombia_local_date(self):
+        event = make_event(self.user, event_date="2026-10-16T03:00:00Z")
+        Task.objects.create(
+            event=event, name="Tarea del 15",
+            due_date="2026-10-15", estimated_hours=1,
+        )
+        response = self.client.patch(
+            reverse("event-detail", args=[event.id]),
+            {"event_date": "2026-10-15T04:30:00Z"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("2026-10-14", response.data["event_date"][0])
 
     def test_event_cannot_be_before_its_subtasks(self):
         event = make_event(self.user)
@@ -530,7 +545,106 @@ class TaskReprogramTests(AuthenticatedAPITestCase):
         )
         response = self.client.patch(self.url, {"due_date": target}, format="json")
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["suggested_day"], str(today + timedelta(days=3)))
+
+    def test_reprogram_overload_skips_full_days_after_conflict(self):
+        today = timezone.localdate()
+        self.event.event_date = timezone.now() + timedelta(days=4)
+        self.event.save(update_fields=["event_date"])
+        target = today + timedelta(days=1)
+        self.mover.due_date = today
+        self.mover.save(update_fields=["due_date"])
+        self.ocupante.due_date = target
+        self.ocupante.estimated_hours = 6
+        self.ocupante.save(update_fields=["due_date", "estimated_hours"])
+        Task.objects.create(
+            event=self.event, name="Segundo día lleno",
+            due_date=target + timedelta(days=1), estimated_hours=6,
+        )
+        response = self.client.patch(self.url, {"due_date": target}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            response.data["suggested_day"], str(target + timedelta(days=2))
+        )
+
+    def test_reprogram_overload_does_not_suggest_current_task_date(self):
+        today = timezone.localdate()
+        self.event.event_date = timezone.now() + timedelta(days=20)
+        self.event.save(update_fields=["event_date"])
+        self.mover.due_date = today
+        self.mover.save(update_fields=["due_date"])
+        conflict = today + timedelta(days=5)
+        self.ocupante.due_date = conflict
+        self.ocupante.estimated_hours = 6
+        self.ocupante.save(update_fields=["due_date", "estimated_hours"])
+        response = self.client.patch(self.url, {"due_date": conflict}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertNotEqual(response.data["suggested_day"], str(self.mover.due_date))
+
+    def test_reprogram_overload_uses_previous_day_as_fallback(self):
+        today = timezone.localdate()
+        self.event.event_date = timezone.now() + timedelta(days=3)
+        self.event.save(update_fields=["event_date"])
+        self.mover.due_date = today
+        self.mover.save(update_fields=["due_date"])
+        conflict = today + timedelta(days=2)
+        self.ocupante.due_date = conflict
+        self.ocupante.estimated_hours = 6
+        self.ocupante.save(update_fields=["due_date", "estimated_hours"])
+        Task.objects.create(
+            event=self.event, name="Llena siguiente",
+            due_date=today + timedelta(days=3), estimated_hours=6,
+        )
+        response = self.client.patch(self.url, {"due_date": conflict}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(response.data["suggested_day"], str(today + timedelta(days=1)))
+
+    def test_reprogram_overload_suggestion_uses_bounded_queries(self):
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+        from .views import daily_overload_payload
+
+        today = timezone.localdate()
+        self.event.event_date = timezone.now() + timedelta(days=20)
+        self.event.save(update_fields=["event_date"])
+        self.mover.due_date = today
+        self.mover.save(update_fields=["due_date"])
+        self.ocupante.due_date = today + timedelta(days=10)
+        self.ocupante.estimated_hours = 6
+        self.ocupante.save(update_fields=["due_date", "estimated_hours"])
+        task = Task.objects.select_related("event").get(pk=self.mover.pk)
+        self.user.profile.daily_hours_limit
+        with CaptureQueriesContext(connection) as queries:
+            payload = daily_overload_payload(
+                task, self.user, self.ocupante.due_date, task.estimated_hours
+            )
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(queries), 2)
+
+    def test_reprogram_overload_for_past_event_has_no_suggestion(self):
+        self.event.event_date = timezone.now() - timedelta(days=1)
+        self.event.save(update_fields=["event_date"])
+        response = self.client.patch(self.url, {"due_date": "2026-10-10"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIsNone(response.data["suggested_day"])
+
+    def test_suggested_day_is_not_before_colombia_today(self):
+        instant = datetime(2026, 10, 15, 4, 30, tzinfo=dt_timezone.utc)
+        with patch("django.utils.timezone.now", return_value=instant):
+            self.event.event_date = datetime(
+                2026, 10, 18, 18, tzinfo=dt_timezone.utc
+            )
+            self.event.save(update_fields=["event_date"])
+            self.mover.due_date = datetime(2026, 10, 14).date()
+            self.mover.save(update_fields=["due_date"])
+            self.ocupante.due_date = datetime(2026, 10, 15).date()
+            self.ocupante.estimated_hours = 6
+            self.ocupante.save(update_fields=["due_date", "estimated_hours"])
+            response = self.client.patch(
+                self.url, {"due_date": "2026-10-15"}, format="json"
+            )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertGreaterEqual(response.data["suggested_day"], "2026-10-15")
 
     def test_reprogram_overload_has_no_suggested_day_when_all_days_are_full(self):
         today = timezone.localdate()
@@ -842,6 +956,28 @@ class HoyViewTests(APITestCase):
         self.client.credentials()
         response = self.client.get(reverse("hoy"))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_hoy_uses_colombia_date_before_utc_midnight_boundary(self):
+        task = Task.objects.create(
+            event=self.event, name="Tarea del 14",
+            due_date="2026-10-14", estimated_hours=1,
+        )
+        instant = datetime(2026, 10, 15, 4, 30, tzinfo=dt_timezone.utc)
+        with patch("django.utils.timezone.now", return_value=instant):
+            response = self.client.get(reverse("hoy"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(task.id, [item["id"] for item in response.data["para_hoy"]])
+
+    def test_hoy_changes_to_next_colombia_date_at_midnight(self):
+        task = Task.objects.create(
+            event=self.event, name="Tarea del 15",
+            due_date="2026-10-15", estimated_hours=1,
+        )
+        instant = datetime(2026, 10, 15, 5, 0, tzinfo=dt_timezone.utc)
+        with patch("django.utils.timezone.now", return_value=instant):
+            response = self.client.get(reverse("hoy"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(task.id, [item["id"] for item in response.data["para_hoy"]])
 
     def test_hoy_groups_and_orders_tasks(self):
         response = self.client.get(reverse("hoy"))
