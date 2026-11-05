@@ -1,0 +1,11 @@
+[run]
+source = api
+omit =
+    api/migrations/*
+    api/tests/*
+    api/tests.py
+    api/demo.py
+    api/management/*
+    api/admin.py
+    api/apps.py
+    api/signals.py
