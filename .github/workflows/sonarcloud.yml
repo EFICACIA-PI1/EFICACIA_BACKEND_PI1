@@ -40,9 +40,13 @@ permissions:
 
 jobs:
   Analysis:
+    if: ${{ secrets.SONAR_TOKEN != '' }}
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Analyze with SonarCloud
 
         # You can pin the exact commit or the version.
@@ -55,8 +59,8 @@ jobs:
           args:
             # Unique keys of your project and organization. You can find them in SonarCloud > Information (bottom-left menu)
             # mandatory
-            -Dsonar.projectKey=
-            -Dsonar.organization=
+            -Dsonar.projectKey=EFICACIA_BACKEND_PI1
+            -Dsonar.organization=eficacia-pi1
             # Comma-separated paths to directories containing main source files.
             #-Dsonar.sources= # optional, default is project base directory
             # Comma-separated paths to directories containing test source files.
