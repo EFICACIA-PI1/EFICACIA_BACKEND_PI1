@@ -36,6 +36,12 @@ jobs:
           DEBUG: "False"
         run: python -m pytest
 
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: SonarCloud scan
         uses: SonarSource/sonarcloud-github-action@v2.2.0
         env:
