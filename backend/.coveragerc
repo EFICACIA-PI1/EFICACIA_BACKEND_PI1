@@ -3,6 +3,7 @@ source = api
 omit =
     api/migrations/*
     api/tests/*
+    api/test_*.py
     api/tests.py
     api/demo.py
     api/management/*
