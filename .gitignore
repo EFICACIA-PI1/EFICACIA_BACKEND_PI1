@@ -25,6 +25,15 @@ venv/
 
 # Python
 __pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 staticfiles/
 *.sqlite3
+
+# SonarCloud
+.scannerwork/
