@@ -44,4 +44,4 @@ jobs:
           projectBaseDir: backend
           args: >
             -Dsonar.organization=eficacia-pi1
-            -Dsonar.projectKey=EFICACIA-PI1_EFICACIA_FRONTEND_PI1
+            -Dsonar.projectKey=EFICACIA-PI1_EFICACIA_BACKEND_PI1
