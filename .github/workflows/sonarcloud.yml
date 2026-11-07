@@ -37,7 +37,7 @@ jobs:
         run: python -m pytest
 
       - name: SonarCloud scan
-        uses: SonarSource/sonarqube-scan-action@8d1368df5eeeb9cdc57578ca822854efeed23ea6
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
